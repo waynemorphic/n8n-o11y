@@ -1,0 +1,120 @@
+// Logging configuration
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// OTLP (OpenTelemetry) receiver for traces
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    metrics = [otelcol.processor.batch.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+  }
+}
+
+// Faro (Frontend Observability) receiver for Real User Monitoring of frontend client (RUM)
+// cors_allowed_origins=["https://actualdomain.com] for prod
+faro.receiver "default" {
+  server {
+    listen_address = "0.0.0.0"
+    listen_port    = 12347
+    cors_allowed_origins = ["*"]
+  }
+
+  output {
+    logs    = [loki.process.faro.receiver]
+  }
+}
+
+// Process Faro logs
+loki.process "faro" {
+  forward_to = [loki.write.default.receiver]
+}
+
+// Batch processor
+otelcol.processor.batch "default" {
+  output {
+    metrics = [otelcol.exporter.prometheus.default.input]
+    logs    = [otelcol.exporter.loki.default.input]
+  }
+}
+
+
+// Export logs to Loki
+otelcol.exporter.loki "default" {
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  external_labels = {
+    job = "alloy",
+  }
+
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+// Export metrics to Prometheus format
+otelcol.exporter.prometheus "default" {
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+
+prometheus.remote_write "default" {
+  endpoint {
+    url = "http://prometheus:9090/api/v1/write"
+  }
+}
+
+// Scrape n8n metrics
+prometheus.scrape "n8n" {
+  targets = [{"__address__" = "n8n:9000"}]
+  metrics_path = "/metrics"
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+
+// Discover Docker Containers
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Filter to Keycloak and apply external_labels
+discovery.relabel "n8n" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex = "/n8n_service"
+    action = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    target_label = "container"
+  }
+
+  rule {
+    replacement = "n8n"
+    target_label = "app"
+  }
+
+  rule {
+    replacement = "production"
+    target_label = "env"
+  }
+}
+
+// Tail Logs from n8n container
+loki.source.docker "n8n" {
+  host = "unix:///var/run/docker.sock"
+  targets = discovery.relabel.n8n.output
+  forward_to = [loki.write.default.receiver]
+}
